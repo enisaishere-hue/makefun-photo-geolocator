@@ -1,7 +1,11 @@
 // photo-geolocator-01 entry for @aqist (make.fun).
 // One claude-sonnet-5-5 call per photo through the gateway, with a short
 // GeoGuessr-style reasoning prompt, then the answers are posted in photo order.
-// A photo whose call is refused or whose answer holds no coordinates falls back
+// The prompt distils the deduction order and clue tables of the geolocation
+// and geoguessr methodology references (hierarchical elimination, bollard /
+// pole / plate / road-line tables, verification gate) into vision-only
+// reasoning: no web fetch, no reverse image search and no photo table run
+// inside the entry. A photo whose call is refused or whose answer holds no
 // to a fixed prior point: the median of the 75 public practice photos
 // (30.253517, 21.031961), which misses by ~7,294 km on average instead of the
 // 20,015 km an unanswered photo counts. The fallback is one constant, not a
@@ -19,10 +23,46 @@ const MODEL = 'claude-sonnet-5-5';
 const MAX_TOKENS = 1024;
 const CONCURRENCY = 4;
 const PROMPT =
-  'Look at this street-level photo and work out where on Earth it was taken. ' +
-  'Use the visible clues: language and script on signs, which side of the road vehicles drive on, ' +
-  'road markings and sign shapes, vegetation and climate, architecture, vehicles and license plates, ' +
-  'and any landmark. Reason briefly, then give your best estimate as one line of JSON on its own last line: ' +
+  'Geolocate this street-level photo. Work in this order, briefly:\n' +
+  '1. Environmental read first: continent, biome (vegetation, soil, terrain), road quality, driving side. ' +
+  'Left-hand traffic means the UK, Ireland, Japan, Australia, New Zealand, India, Thailand, Indonesia, Malaysia, ' +
+  'South Africa, Kenya or another former British territory; everywhere else drives on the right.\n' +
+  '2. Script and language on signs: Cyrillic = Russia, Ukraine, Belarus, Bulgaria (word endings in -ът), Serbia, North Macedonia, Mongolia; ' +
+  'Ukrainian Cyrillic has ї, є, ґ. Hangul = South Korea. Kanji + Hiragana + Katakana = Japan. Simplified Chinese = mainland China, ' +
+  'traditional = Taiwan, Hong Kong. Thai, Khmer, Lao, Myanmar scripts are distinct. Devanagari = India, Nepal. Arabic script = Middle East, ' +
+  'North Africa, Pakistan, Iran; Urdu adds extra dotted letters. Latin with ñ = Spanish-speaking; ç, ã, õ = Portugal, Brazil; ' +
+  'ø, å = Denmark, Norway; ä, ö, ü = Germany, Austria, Switzerland, Turkey (also ş, ğ, ı); ą, ę, ł, ź = Poland; ř, ě, ů = Czech. ' +
+  'Ge\'ez = Ethiopia, Eritrea. Georgian and Armenian scripts are unique. Greek = Greece, Cyprus.\n' +
+  '3. Country narrowers. Bollards: France white post with a red strip; Poland one broad red diagonal stripe; Czech fluorescent orange stripes; ' +
+  'Hungary red front / white back reflector; Austria black hat on top; Germany tall narrow white front + red back, rectangular reflectors; ' +
+  'Netherlands red/white striped; Sweden, Norway, Finland short white posts with yellow reflector tops; UK large red reflector on top; ' +
+  'Denmark white with red reflector; Spain black/white with a yellow rectangle; Thailand obelisk black/white; Malaysia two red rectangles; ' +
+  'Estonia cylindrical with rectangular front and two circle rear reflectors; Latvia thin plank; Lithuania wedge, orange front. ' +
+  'Utility poles: France small blue stickers; Japan dense wiring and yellow/black striped poles; Hungary, Romania, Poland have concrete poles ' +
+  'with holes ("holey poles") — holes to the ground plus a yellow voltage marker and white base paint = Romania, holes stopping above ground = ' +
+  'Hungary or Poland; Taiwan yellow/black stripes touching the ground; Ukraine and Russia T-shaped crossbars. ' +
+  'License plates: EU blue strip on the left with a country code (D, F, I, E, P, NL, B, A, PL, CZ, SK, H, RO, BG, HR, SLO; Switzerland red strip); ' +
+  'UK wide plates, yellow rear; Japan small plates, yellow for kei cars, white otherwise, green text; South Korea wide; China blue, green for EVs, ' +
+  'with Chinese characters; India white front, yellow rear; Brazil and Argentina Mercosul white with a blue band on top; US and Canada state designs; ' +
+  'Mexico colourful state plates; Thailand Thai script; Kenya white plates with a K prefix; South Africa province-coded. ' +
+  'Road lines: yellow center line = the Americas (except Chile, all white), Iceland, Norway; white center = Europe, Asia, Africa, Oceania; ' +
+  'double white center = Poland, Latvia; double yellow center = Brazil; yellow outer lines = South Africa, Israel, Jordan, UAE, Oman. ' +
+  'Direction signs: green = most of Europe and the Americas, blue = motorways in the EU, white = UK, yellow = Australia.\n' +
+  '4. Sub-country placement: architecture (colourful colonial = Latin America; half-timbered = Germany, Alsace, England, Scandinavia; ' +
+  'brutalist concrete = former Soviet states and Eastern Europe; terracotta roofs = Mediterranean and Latin America; tin roofs = Sub-Saharan Africa, ' +
+  'Caribbean, Southeast Asia; flat roofs with satellite dishes = Middle East, North Africa; red wooden houses = Sweden; whitewashed walls = Greece, ' +
+  'southern Spain, Morocco, Tunisia), vegetation (red soil = Brazil, Sub-Saharan Africa, India, Southeast Asia; birch = northern Europe, Russia, Canada; ' +
+  'eucalyptus = Australia; baobab = Sub-Saharan Africa; rice paddies = Southeast Asia, China, Japan, India; vineyards = Mediterranean, California, ' +
+  'Chile, Argentina, South Africa, Australia; palm oil = Malaysia, Indonesia, West Africa; cacti = Mexico, southwestern US, North Africa, Middle East; ' +
+  'savanna = East Africa, Brazil, northern Australia; dense conifer forest = Scandinavia, Russia, Canada, Pacific Northwest), terrain, ' +
+  'domain names and phone prefixes on signs (.br, .pl, .co.za, .co.uk, .de, .fr, .com.au, .co.jp, .ru, .nl; +1 US/Canada, +44 UK, +33 France, ' +
+  '+49 Germany, +55 Brazil, +91 India, +81 Japan, +86 China), gas station brands (Pemex = Mexico, Petrobras = Brazil, Orlen = Poland, ' +
+  'Sinopec = China, Lukoil = Russia, Total = France and Africa), postbox colours (red = UK, yellow = Germany, blue = US, green = Ireland). ' +
+  'Satellite dishes point south in the northern hemisphere and north in the southern hemisphere; sun in the north also means southern hemisphere. ' +
+  'Jollibee = Philippines, pink taxis = Mexico City, rickshaws = Bangladesh, cobblestone = Portugal, Brazil, Central European town centres.\n' +
+  'Verification gate before answering: name two or three alternative countries that fit the clues, eliminate each with one specific visible clue, ' +
+  'then check the winner against the tiers above for contradictions. If nothing distinguishes, give your best single estimate anyway.\n' +
+  'Keep the reasoning under about 200 words, then give the estimate as one line of JSON on its own last line: ' +
   '{"lat": <degrees north>, "lon": <degrees east>}.';
 /** Retried with a fixed backoff: a provider's transient errors. A gateway refusal (4xx) is final. */
 const RETRY_STATUSES = [408, 429, 500, 502, 503, 504, 529];
